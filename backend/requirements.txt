@@ -11,3 +11,5 @@ flask-cors==4.0.0
 requests
 yt-dlp
 youtube-transcript-api
+langchain-google-genai
+langchain-community
