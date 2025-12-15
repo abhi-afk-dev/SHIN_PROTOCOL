@@ -5,6 +5,8 @@ import FaultyTerminal from "./Faulty";
 import { Link, Upload, FileImage } from "lucide-react";
 import { InstagramEmbed, TikTokEmbed } from "react-social-media-embed";
 
+const API_BASE_URL = import.meta.env.VITE_API_URL;
+
 const FakeReelPlayer = ({ url, verdict }) => {
   const getPlatform = (link) => {
     if (!link) return "unknown";
