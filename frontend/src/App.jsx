@@ -166,76 +166,85 @@ export default function App() {
     []
   );
 
-  const handleInvestigate = async () => {
-    if (mode === "url" && !url && !claim) {
-      alert("Please provide a URL or a Claim.");
-      return;
-    }
-    if (mode === "upload" && !file && !claim) {
-      alert("Please upload a file or provide a Claim.");
-      return;
-    }
+ const handleInvestigate = async () => {
+   if (mode === "url" && !url && !claim) {
+     alert("Please provide a URL or a Claim.");
+     return;
+   }
+   if (mode === "upload" && !file && !claim) {
+     alert("Please upload a file or provide a Claim.");
+     return;
+   }
 
-    setLoading(true);
-    setLogs([]);
-    setResult(null);
+   setLoading(true);
+   setLogs([]);
+   setResult(null);
 
-    try {
-      const headers =
-        mode === "upload" ? {} : { "Content-Type": "application/json" };
-      const body =
-        mode === "upload"
-          ? (() => {
-              const fd = new FormData();
-              fd.append("file", file);
-              fd.append("claim_text", claim);
-              return fd;
-            })()
-          : JSON.stringify({ image_url: url, claim_text: claim });
+   try {
+     const headers =
+       mode === "upload" ? {} : { "Content-Type": "application/json" };
+     const body =
+       mode === "upload"
+         ? (() => {
+             const fd = new FormData();
+             fd.append("file", file);
+             fd.append("claim_text", claim);
+             return fd;
+           })()
+         : JSON.stringify({ image_url: url, claim_text: claim });
 
-      const response = await fetch("http://127.0.0.1:5000/investigate", {
-        method: "POST",
-        headers: headers,
-        body: body,
-      });
+     const response = await fetch(`${API_BASE_URL}/investigate`, {
+       method: "POST",
+       headers: headers,
+       body: body,
+     });
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
+     const reader = response.body.getReader();
+     const decoder = new TextDecoder();
+     let buffer = ""; // <--- NEW: Buffer to hold split chunks
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+     while (true) {
+       const { done, value } = await reader.read();
+       if (done) break;
 
-        const chunk = decoder.decode(value);
-        const lines = chunk.split("\n").filter((line) => line.trim() !== "");
+       // Append new chunk to buffer
+       buffer += decoder.decode(value, { stream: true });
 
-        for (const line of lines) {
-          try {
-            const data = JSON.parse(line);
+       // Process complete lines only
+       const lines = buffer.split("\n");
 
-            if (data.type === "log") {
-              setLogs((prev) => [...prev, `[${data.agent}] ${data.message}`]);
-            } else if (data.type === "result") {
-              console.log("FINAL RESULT RECEIVED:", data);
-              setResult({
-                final_verdict: data.final_verdict,
-                swarm_logs: data.swarm_logs,
-                auto_claim: data.auto_claim,
-                is_video: data.is_video,
-              });
-            }
-          } catch (e) {
-            console.error("Stream Parse Error", e);
-          }
-        }
-      }
-    } catch (error) {
-      console.error("Stream Error:", error);
-      alert("System Offline: Is Flask running?");
-    }
-    setLoading(false);
-  };
+       // Keep the last part in the buffer (it might be incomplete)
+       buffer = lines.pop();
 
+       for (const line of lines) {
+         if (!line.trim()) continue;
+         try {
+           const data = JSON.parse(line);
+
+           if (data.type === "log") {
+             setLogs((prev) => [...prev, `[${data.agent}] ${data.message}`]);
+           } else if (data.type === "result") {
+             console.log("FINAL RESULT:", data);
+             setResult({
+               final_verdict: data.final_verdict,
+               swarm_logs: data.swarm_logs,
+               auto_claim: data.auto_claim,
+               is_video: data.is_video,
+             });
+           } else if (data.type === "ping") {
+             // Ignore keep-alive pings
+           }
+         } catch (e) {
+           console.error("JSON Parse Error (ignoring):", e);
+         }
+       }
+     }
+   } catch (error) {
+     console.error("Stream Error:", error);
+     // Don't alert immediately, check logs first
+   }
+   setLoading(false);
+ };
   return (
     <div className="w-full h-screen">
       <div className="w-full h-screen absolute inset-0 z-0 ">
