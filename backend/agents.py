@@ -1,0 +1,232 @@
+import os
+import asyncio
+import base64
+import requests
+import json
+import re
+import queue
+import threading
+import traceback
+from dotenv import load_dotenv
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.tools import DuckDuckGoSearchResults
+from langchain_core.messages import HumanMessage
+import yt_dlp
+
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi
+except ImportError:
+    YouTubeTranscriptApi = None
+
+load_dotenv()
+
+class ShinSwarm:
+    def __init__(self):
+        self.llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=os.getenv("GOOGLE_API_KEY"))
+        self.search_tool = DuckDuckGoSearchResults()
+    
+    def clean_json_output(self, text):
+        default_verdict = {
+            "verdict": "UNVERIFIED", 
+            "confidence_score": 0, 
+            "summary": "The system could not generate a conclusive verdict.", 
+            "sources": []
+        }
+
+        try:
+            data = None
+            if isinstance(text, dict): 
+                data = text
+            else:
+                text = text.replace("```json", "").replace("```", "")
+                match = re.search(r'\{.*\}', text, re.DOTALL)
+                if match: 
+                    data = json.loads(match.group(0))
+                else:
+                    data = json.loads(text)
+            
+            if not data or "verdict" not in data:
+                print("Warning: JSON missing keys, using default.")
+                return default_verdict
+                
+            return data
+
+        except Exception as e:
+            print(f"JSON Clean Error: {e}")
+            return default_verdict
+
+    def _get_video_data(self, url):
+        ydl_opts = {
+            'quiet': True, 'noplaylist': True, 'skip_download': True,
+            'extract_flat': True, 'no_warnings': True, 'ignoreerrors': True,
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        }
+        
+        data = {"title": "Social Media Video", "description": "", "transcript": ""}
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info:
+                    data['title'] = info.get('title', 'Social Media Video')
+                    data['description'] = info.get('description', '') or info.get('caption', '')
+        except:
+            pass
+
+        try:
+            if YouTubeTranscriptApi and any(x in url for x in ['youtube', 'youtu.be', 'shorts']):
+                video_id = None
+                if "v=" in url: video_id = url.split("v=")[1].split("&")[0]
+                elif "shorts" in url: video_id = url.split("shorts/")[1].split("?")[0]
+                elif "youtu.be" in url: video_id = url.split("/")[-1].split("?")[0]
+                
+                if video_id:
+                    t_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                    try: t = t_list.find_transcript(['en', 'en-US'])
+                    except: t = t_list.find_generated_transcript(['en', 'en-US'])
+                    data['transcript'] = " ".join([x['text'] for x in t.fetch()])[:2000]
+        except:
+            pass
+            
+        return data
+
+    async def run_search_agent(self, query, log_queue):
+        await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": f"Deep Scanning: {query}..."}))
+        try:
+            task1 = asyncio.to_thread(self.search_tool.run, f"{query} fact check hoax")
+            task2 = asyncio.to_thread(self.search_tool.run, f"{query} latest news today")            
+            results = await asyncio.gather(task1, task2)
+            combined_evidence = f"--- SPECIFIC FACT CHECK RESULTS ---\n{results[0]}\n\n--- LATEST NEWS/ACTIVITY RESULTS ---\n{results[1]}"
+            
+            await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": "Cross-referencing complete."}))            
+            return {"data": combined_evidence}
+        
+        except: return {"data": "Search Failed"}
+    
+    async def run_vision_agent(self, b64, claim, log_queue):
+        await log_queue.put(json.dumps({"type": "log", "agent": "VISION", "message": "Analyzing visual data..."}))
+        try:
+            if not b64: return {"data": await self.llm.ainvoke(f"Check logic: {claim}").content}
+            msg = HumanMessage(content=[
+                {"type": "text", "text": "Describe for fact-checking:"},
+                {"type": "image_url", "image_url": f"data:image/jpeg;base64,{b64}"}
+            ])
+            res = await self.llm.ainvoke([msg])
+            return {"data": res.content}
+        except: return {"data": "Vision Analysis Failed"}
+
+    async def run_video_agent(self, url, claim, log_queue):
+        await log_queue.put(json.dumps({"type": "log", "agent": "VIDEO_OPS", "message": "Extracting Metadata..."}))
+        data = await asyncio.to_thread(self._get_video_data, url)
+        
+        context = f"Title: {data.get('title')}\nDesc: {data.get('description')}\nTranscript: {data.get('transcript')}"
+        prompt = f"Analyze video context for truth: {context}. User Claim: {claim}"
+        
+        try:
+            res = await self.llm.ainvoke(prompt)
+            return {"data": res.content}
+        except: return {"data": "Video Analysis Failed"}
+            
+    async def run_judge_agent(self, search, vision, claim, log_queue):
+        await log_queue.put(json.dumps({"type": "log", "agent": "JUDGE", "message": "Finalizing Verdict..."}))
+        prompt = f"""
+        Act as Veritas Protocol Judge.
+        User Claim: "{claim}"
+        
+        EVIDENCE PACK (Contains 2 Search Strategies): 
+        {str(search)}
+        
+        VISUAL ANALYSIS: 
+        {str(vision)[:1500]}
+        
+        CRITICAL INSTRUCTIONS:
+        1. If "Fact Check" results are empty, look at "Latest News". And if the claim is AI-generated content, mark as Fake.
+        2. CONTRADICTION CHECK: If the claim says someone "died today", but "Latest News" shows them attending events or active TODAY/YESTERDAY, the claim is FAKE.
+        3. Ignore irrelevant results (e.g. historical articles from years ago).
+        
+        Return STRICT JSON: 
+        {{ 
+            "verdict": "REAL" | "FAKE", 
+            "confidence_score": 0-100, 
+            "summary": "Explain WHY based on the evidence found (e.g. 'Subject is active today according to news reports').", 
+            "sources": [ {{"name": "News Outlet Name", "url": "https://..."}} ] 
+        }}
+        """
+        try:
+            res = await self.llm.ainvoke(prompt)
+            return self.clean_json_output(res.content)
+        except:
+            return self.clean_json_output("{}")
+
+    async def _investigate_internal(self, image_input, claim_text, is_file, log_queue):
+        final_data = {
+            "type": "result",
+            "final_verdict": {
+                "verdict": "ERROR", 
+                "confidence_score": 0, 
+                "summary": "System Error occurred.", 
+                "sources": []
+            },
+            "swarm_logs": [],
+            "is_video": False,
+            "auto_claim": claim_text
+        }
+        
+        try:
+            is_video = False
+            if image_input and not is_file and any(x in image_input.lower() for x in ['youtube', 'youtu.be', 'instagram', 'tiktok']):
+                is_video = True
+            
+            final_data['is_video'] = is_video
+            
+            search_task = self.run_search_agent(claim_text, log_queue)
+            if is_video: analysis_task = self.run_video_agent(image_input, claim_text, log_queue)
+            else: 
+                b64 = image_input
+                if not is_file: 
+                    try: b64 = base64.b64encode(requests.get(image_input).content).decode('utf-8')
+                    except: pass
+                analysis_task = self.run_vision_agent(b64, claim_text, log_queue)
+            
+            results = await asyncio.gather(search_task, analysis_task)
+            
+            # The Critical Step: Get Verdict
+            verdict = await self.run_judge_agent(results[0], results[1], claim_text, log_queue)
+            
+            # Update the result data
+            final_data['final_verdict'] = verdict
+            final_data['swarm_logs'] = [results[0], results[1]]
+            
+        except Exception as e:
+            err_msg = f"CRITICAL ERROR: {str(e)}"
+            print(traceback.format_exc()) 
+            await log_queue.put(json.dumps({"type": "log", "agent": "SYSTEM", "message": err_msg}))
+            final_data['final_verdict']['summary'] = f"Analysis interrupted: {str(e)}"
+            
+        finally:
+            # Send the result to frontend
+            await log_queue.put(json.dumps(final_data))
+            await log_queue.put(None)
+            
+    def investigate_stream_sync(self, image_input, claim_text, is_file=False):
+        sync_q = queue.Queue()
+        def start_loop():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            async def wrapper():
+                q = asyncio.Queue()
+                asyncio.create_task(self._investigate_internal(image_input, claim_text, is_file, q))
+                while True:
+                    item = await q.get()
+                    sync_q.put(item)
+                    if item is None: break
+            loop.run_until_complete(wrapper())
+            loop.close()
+
+        t = threading.Thread(target=start_loop)
+        t.start()
+        while True:
+            item = sync_q.get()
+            if item is None: break
+            yield item + "\n"

@@ -1,0 +1,51 @@
+# --- DEPENDENCIES & ENVIRONMENTS ---
+node_modules/
+env/
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- SECURITY (CRITICAL) ---
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+backend/.env
+
+# --- BUILD OUTPUTS ---
+# Frontend build (Vite/React)
+dist/
+build/
+# Backend build artifacts
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# --- LOGS & DEBUG ---
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+*.log
+
+# --- SYSTEM & IDE FILES ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
