@@ -223,14 +223,11 @@ class ShinSwarm:
                     if item is None: break
             loop.run_until_complete(wrapper())
             loop.close()
-
+            
 
         t = threading.Thread(target=start_loop)
         t.start()
         while True:
-            try:
-                item = sync_q.get(timeout=2.0)
-                if item is None: break
-                yield item + "\n"
-            except queue.Empty:
-                yield json.dumps({"type": "ping"}) + "\n"
+            item = sync_q.get()
+            if item is None: break
+            yield item + "\n"

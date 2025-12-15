@@ -474,7 +474,7 @@ export default function App() {
 
             <button
               onClick={() =>
-                setResult(null) && setUrl("") && setClaim("") && setFile(null)
+                setResult(null) 
               }
               className="text-gray-500 hover:text-white underline text-center text-sm tracking-widest hover:tracking-[0.2em] transition-all pb-10"
             >
