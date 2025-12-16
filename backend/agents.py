@@ -76,7 +76,7 @@ class ShinSwarm:
         data = {"title": "", "description": "", "transcript": ""}
         video_id = None
         
-        # 1. Extract Video ID
+        # 1. Extract Video ID (Same as before)
         try:
             if "v=" in url: video_id = url.split("v=")[1].split("&")[0]
             elif "shorts/" in url: video_id = url.split("shorts/")[1].split("?")[0]
@@ -85,26 +85,29 @@ class ShinSwarm:
 
         if not video_id: return data
 
-        # 2. PIPED API MIRRORS (The "Undetectable" Scraper)
-        # We try multiple instances because public ones can get overloaded
+        # 2. PIPED API MIRRORS (UPDATED LIST)
+        # We use a diverse list of reliable instances to ensure at least one works.
         piped_instances = [
-            "https://pipedapi.kavin.rocks",
-            "https://api.piped.kotkot.eu",
-            "https://pipedapi.drgns.space",
-            "https://api.piped.privacydev.net"
+            "https://pipedapi.kavin.rocks",       # Official (often busy)
+            "https://api.piped.privacy.com.de",   # High Stability
+            "https://api.piped.projectsegfau.lt", # Reliable Community Instance
+            "https://pipedapi.tokhmi.xyz",        # Backup
+            "https://pipedapi.smnz.de",           # Backup
+            "https://piped-api.lunar.icu"         # Backup
         ]
 
         for api_base in piped_instances:
             try:
                 print(f"Trying Piped Mirror: {api_base} for {video_id}...")
-                res = requests.get(f"{api_base}/streams/{video_id}", timeout=6)
+                # Reduced timeout to 3s to fail fast and find a working one quickly
+                res = requests.get(f"{api_base}/streams/{video_id}", timeout=3)
                 
                 if res.status_code == 200:
                     js = res.json()
                     data['title'] = js.get('title', '')
-                    data['description'] = js.get('description', '')[:1000] # Cap description
+                    data['description'] = js.get('description', '')[:1000]
                     
-                    # 3. FETCH SUBTITLES FROM PIPED
+                    # 3. FETCH SUBTITLES
                     subtitles = js.get('subtitles', [])
                     english_sub = next((s for s in subtitles if 'en' in s.get('code', '')), None)
                     
@@ -114,17 +117,15 @@ class ShinSwarm:
                         if sub_res.status_code == 200:
                             data['transcript'] = self._clean_vtt(sub_res.text)[:2500]
                     
-                    # If we got data, break the loop (don't try other mirrors)
                     if data['title']:
-                        print("Success via Piped Protocol.")
+                        print(f"Success via {api_base}")
                         return data
                         
             except Exception as e:
                 print(f"Mirror {api_base} failed: {e}")
                 continue
 
-        # 4. FALLBACK: oEmbed (Title Only)
-        # If all Piped mirrors fail, at least get the Title so the Judge isn't totally blind.
+        # 4. FALLBACK (Same as before)
         if not data['title']:
             try:
                 print("All Piped mirrors failed. Using oEmbed Fallback.")
@@ -135,6 +136,7 @@ class ShinSwarm:
             except: pass
 
         return data
+    
     def _smart_search(self, query):
         print(f"DEBUG: Smart search for '{query}'")
         max_retries = 3
