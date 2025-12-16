@@ -9,6 +9,7 @@ import threading
 import time
 import random
 from dotenv import load_dotenv
+from ddgs import DDGS
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from duckduckgo_search import DDGS
