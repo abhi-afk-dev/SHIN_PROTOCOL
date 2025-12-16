@@ -71,27 +71,22 @@ class ShinSwarm:
 
         if not video_id: return data
 
-        # --- LAYER 1: Piped API (Best for Description/Metadata) ---
-        # Piped proxies the request, so Render's IP won't get blocked by YouTube.
+        # --- LAYER 1: Piped API (Metadata) ---
         try:
             print(f"Fetching metadata via Piped API for {video_id}...")
-            # Use a reliable public instance
             piped_url = f"https://pipedapi.kavin.rocks/streams/{video_id}"
             res = requests.get(piped_url, timeout=5)
-            
             if res.status_code == 200:
                 js = res.json()
                 data['title'] = js.get('title', '')
                 data['description'] = js.get('description', '')
-                # Add stats to description for the Judge
                 views = js.get('views', 0)
                 likes = js.get('likes', 0)
                 data['description'] += f"\n\n[Metadata] Views: {views}, Likes: {likes}"
         except Exception as e:
             print(f"Piped API Failed: {e}")
 
-        # --- LAYER 2: oEmbed Fallback (If Piped fails) ---
-        # If Piped is down, use official oEmbed to at least get the Title.
+        # --- LAYER 2: oEmbed Fallback ---
         if not data['title']:
             try:
                 print("Attempting oEmbed Fallback...")
@@ -104,20 +99,32 @@ class ShinSwarm:
             except Exception as e:
                 print(f"oEmbed Failed: {e}")
 
-        # --- LAYER 3: Transcript (The "Real" Content) ---
-        # This uses a different internal API that is rarely blocked.
+        # --- LAYER 3: Transcript (Hybrid Method) ---
         try:
             print(f"Fetching Transcript for {video_id}...")
-            t_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            try: t = t_list.find_transcript(['en', 'en-US'])
-            except: t = t_list.find_generated_transcript(['en', 'en-US'])
+            transcript_text = ""
             
-            transcript_text = " ".join([x['text'] for x in t.fetch()])
-            data['transcript'] = transcript_text[:2500] # Cap length for LLM
+            # Try Modern Method (Preferred)
+            try:
+                t_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                try: t = t_list.find_transcript(['en', 'en-US'])
+                except: t = t_list.find_generated_transcript(['en', 'en-US'])
+                transcript_text = " ".join([x['text'] for x in t.fetch()])
+            
+            # Fallback for Old Library Version (AttributeError)
+            except AttributeError:
+                print("Method 'list_transcripts' missing. Using legacy 'get_transcript'.")
+                # The old method returns the list of dicts directly
+                t_data = YouTubeTranscriptApi.get_transcript(video_id)
+                transcript_text = " ".join([x['text'] for x in t_data])
+                
+            data['transcript'] = transcript_text[:2500]
+            
         except Exception as e:
             print(f"Transcript Error: {e}")
             
         return data
+
     def _smart_search(self, query):
         print(f"DEBUG: Smart search for '{query}'")
         max_retries = 3
