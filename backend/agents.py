@@ -26,7 +26,7 @@ load_dotenv()
 class ShinSwarm:
     def __init__(self):
         self.llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=os.getenv("GOOGLE_API_KEY"))
-    
+
     def clean_json_output(self, text):
         default_verdict = {
             "verdict": "UNVERIFIED", 
@@ -58,41 +58,43 @@ class ShinSwarm:
             return default_verdict
 
     def _get_video_data(self, url):
-        data = {"title": "", "description": "", "transcript": ""}
+        ydl_opts = {
+            'quiet': True, 'noplaylist': True, 'skip_download': True,
+            'extract_flat': True, 'no_warnings': True, 'ignoreerrors': True,
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        }
         
-        # 1. Try oEmbed (Official Public API - No Login Required)
-        if "youtube" in url or "youtu.be" in url:
-            try:
-                oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
-                res = requests.get(oembed_url, timeout=3)
-                if res.status_code == 200:
-                    js = res.json()
-                    data['title'] = js.get('title', '')
-                    data['description'] = f"Author: {js.get('author_name', 'Unknown')}"
-            except: pass
-
-        # 2. Try Transcript (Only if library works)
+        data = {"title": "Social Media Video", "description": "", "transcript": ""}
+        
         try:
-            if YouTubeTranscriptApi and data['title']: 
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info:
+                    data['title'] = info.get('title', 'Social Media Video')
+                    data['description'] = info.get('description', '') or info.get('caption', '')
+        except:
+            pass
+
+        try:
+            if YouTubeTranscriptApi and any(x in url for x in ['youtube', 'youtu.be', 'shorts']):
                 video_id = None
                 if "v=" in url: video_id = url.split("v=")[1].split("&")[0]
-                elif "shorts/" in url: video_id = url.split("shorts/")[1].split("?")[0]
-                elif "youtu.be/" in url: video_id = url.split("youtu.be/")[1].split("?")[0]
+                elif "shorts" in url: video_id = url.split("shorts/")[1].split("?")[0]
+                elif "youtu.be" in url: video_id = url.split("/")[-1].split("?")[0]
                 
                 if video_id:
                     t_list = YouTubeTranscriptApi.list_transcripts(video_id)
                     try: t = t_list.find_transcript(['en', 'en-US'])
                     except: t = t_list.find_generated_transcript(['en', 'en-US'])
-                    
                     data['transcript'] = " ".join([x['text'] for x in t.fetch()])[:2000]
-        except: 
+        except:
             pass
             
         return data
-    
+
     def _smart_search(self, query):
         print(f"DEBUG: Smart search for '{query}'")
-        max_retries = 2
+        max_retries = 3
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
@@ -100,11 +102,28 @@ class ShinSwarm:
         for attempt in range(max_retries):
             try:
                 with DDGS(headers=headers) as ddgs:
-                    # Use 'lite' backend which is harder for servers to block
-                    web_hits = list(ddgs.text(f"{query} fact check", max_results=5, backend='lite'))
-                    if web_hits: return json.dumps(web_hits)
+                    results = []
+                    
+                    # STRATEGY 1: Try strict "News" search first
+                    # If an event is real, this will have results.
+                    try:
+                        news_hits = list(ddgs.news(f"{query}", max_results=5))
+                        if news_hits:
+                            results.extend(news_hits)
+                    except: pass
+
+                    # STRATEGY 2: If News is empty, use "Text" search (Web)
+                    if not results:
+                        print("DEBUG: No news found, switching to General Web Search...")
+                        web_hits = list(ddgs.text(f"{query} official status", max_results=5, backend='lite'))
+                        results.extend(web_hits)
+
+                    if results:
+                        return json.dumps(results[:5])
+                    
             except Exception as e:
-                time.sleep(1)
+                print(f"Search Attempt {attempt+1} failed: {e}")
+                time.sleep(random.uniform(1, 2))
         
         return "SEARCH_UNAVAILABLE"
 
@@ -188,37 +207,47 @@ class ShinSwarm:
             
             final_data['is_video'] = is_video
             
-            video_context = ""
+            # 1. IF VIDEO, EXTRACT DATA FIRST (BEFORE SEARCH)
+            video_data = None
             if is_video:
-                # 1. GET DATA (Using the robust oEmbed fetcher)
                 video_result = await self.run_video_agent(image_input, claim_text, log_queue)
-                video_data = video_result.get('raw_metadata', {})
-                video_context = video_result.get('data', "")
+                video_data = video_result['raw_metadata']
+                video_context = video_result['data']
 
-                # 2. AUTO-GENERATE CLAIM (Safety Net)
-                # If user left claim empty, we MUST invent one to prevent the Judge from crashing.
+                # 2. AUTO-GENERATE CLAIM IF EMPTY
                 if not claim_text or claim_text.strip() == "":
-                    if video_data.get('title'):
-                        # Best Case: We have the Title from oEmbed
-                        claim_text = f"Check video claim: {video_data['title']}"
-                        await log_queue.put(json.dumps({"type": "log", "agent": "SYSTEM", "message": f"Claim Found: {video_data['title']}"}))
-                    else:
-                        # Worst Case: We use the URL itself (Never crashes)
-                        claim_text = f"Fact check this video: {image_input}"
-                        await log_queue.put(json.dumps({"type": "log", "agent": "SYSTEM", "message": "Using Video URL as Claim"}))
+                    await log_queue.put(json.dumps({"type": "log", "agent": "SYSTEM", "message": "Auto-Detecting Claim from Video..."}))
                     
-                    final_data['auto_claim'] = claim_text
+                    transcript_preview = video_data.get('transcript', '')[:1000]
+                    desc_preview = video_data.get('description', '')[:500]
+                    
+                    # Ask LLM to extract the main claim
+                    claim_prompt = f"""
+                    Based on this video metadata, what is the Main Factual Claim being made?
+                    Title: {video_data.get('title')}
+                    Transcript: {transcript_preview}
+                    Description: {desc_preview}
+                    
+                    Return ONLY the claim as a single sentence.
+                    """
+                    generated_claim = await self.llm.ainvoke(claim_prompt)
+                    claim_text = generated_claim.content.strip()
+                    final_data['auto_claim'] = claim_text # Send back to frontend
+                    await log_queue.put(json.dumps({"type": "log", "agent": "SYSTEM", "message": f"Claim Detected: {claim_text}"}))
             
             else:
                 # Image Logic
+                video_context = ""
                 if not is_file:
                     try: 
                         b64 = base64.b64encode(requests.get(image_input).content).decode('utf-8')
                         video_context = await self.run_vision_agent(b64, claim_text, log_queue)
                     except: pass
 
-            # 3. RUN SEARCH (Now guaranteed to have a valid claim string)
+            # 3. NOW RUN SEARCH WITH THE (POSSIBLY AUTO-GENERATED) CLAIM
             search_task = self.run_search_agent(claim_text, log_queue)
+            
+            # Wait for search
             search_result = await search_task
             
             # 4. JUDGE
@@ -232,8 +261,30 @@ class ShinSwarm:
         finally:
             await log_queue.put(json.dumps(final_data))
             await log_queue.put(None)
-                          
+                  
     def investigate_stream_sync(self, image_input, claim_text, is_file=False):
+        sync_q = queue.Queue()
+        def start_loop():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            async def wrapper():
+                q = asyncio.Queue()
+                asyncio.create_task(self._investigate_internal(image_input, claim_text, is_file, q))
+                while True:
+                    item = await q.get()
+                    sync_q.put(item)
+                    if item is None: break
+            loop.run_until_complete(wrapper())
+            loop.close()
+            
+
+        t = threading.Thread(target=start_loop)
+        t.start()
+        while True:
+            item = sync_q.get()
+            if item is None: break
+            yield item + "\n"
         sync_q = queue.Queue()
         def start_loop():
             loop = asyncio.new_event_loop()
