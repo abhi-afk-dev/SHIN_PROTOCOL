@@ -58,11 +58,25 @@ class ShinSwarm:
             print(f"JSON Clean Error: {e}")
             return default_verdict
 
+    def _clean_vtt(self, vtt_text):
+        # Removes timestamps and duplicates from VTT format
+        lines = vtt_text.split('\n')
+        clean_lines = []
+        seen = set()
+        for line in lines:
+            if "-->" in line or line.strip() == "WEBVTT" or not line.strip(): 
+                continue
+            # simple deduplication
+            if line.strip() not in seen:
+                clean_lines.append(line.strip())
+                seen.add(line.strip())
+        return " ".join(clean_lines)
+
     def _get_video_data(self, url):
         data = {"title": "", "description": "", "transcript": ""}
         video_id = None
         
-        # Extract Video ID
+        # 1. Extract Video ID
         try:
             if "v=" in url: video_id = url.split("v=")[1].split("&")[0]
             elif "shorts/" in url: video_id = url.split("shorts/")[1].split("?")[0]
@@ -71,60 +85,56 @@ class ShinSwarm:
 
         if not video_id: return data
 
-        # --- LAYER 1: Piped API (Metadata) ---
-        try:
-            print(f"Fetching metadata via Piped API for {video_id}...")
-            piped_url = f"https://pipedapi.kavin.rocks/streams/{video_id}"
-            res = requests.get(piped_url, timeout=5)
-            if res.status_code == 200:
-                js = res.json()
-                data['title'] = js.get('title', '')
-                data['description'] = js.get('description', '')
-                views = js.get('views', 0)
-                likes = js.get('likes', 0)
-                data['description'] += f"\n\n[Metadata] Views: {views}, Likes: {likes}"
-        except Exception as e:
-            print(f"Piped API Failed: {e}")
+        # 2. PIPED API MIRRORS (The "Undetectable" Scraper)
+        # We try multiple instances because public ones can get overloaded
+        piped_instances = [
+            "https://pipedapi.kavin.rocks",
+            "https://api.piped.kotkot.eu",
+            "https://pipedapi.drgns.space",
+            "https://api.piped.privacydev.net"
+        ]
 
-        # --- LAYER 2: oEmbed Fallback ---
-        if not data['title']:
+        for api_base in piped_instances:
             try:
-                print("Attempting oEmbed Fallback...")
-                oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
-                res = requests.get(oembed_url, timeout=5)
+                print(f"Trying Piped Mirror: {api_base} for {video_id}...")
+                res = requests.get(f"{api_base}/streams/{video_id}", timeout=6)
+                
                 if res.status_code == 200:
                     js = res.json()
                     data['title'] = js.get('title', '')
-                    data['description'] = f"Author: {js.get('author_name', 'Unknown')}"
+                    data['description'] = js.get('description', '')[:1000] # Cap description
+                    
+                    # 3. FETCH SUBTITLES FROM PIPED
+                    subtitles = js.get('subtitles', [])
+                    english_sub = next((s for s in subtitles if 'en' in s.get('code', '')), None)
+                    
+                    if english_sub:
+                        print(f"Found Subtitles: {english_sub['url']}")
+                        sub_res = requests.get(english_sub['url'])
+                        if sub_res.status_code == 200:
+                            data['transcript'] = self._clean_vtt(sub_res.text)[:2500]
+                    
+                    # If we got data, break the loop (don't try other mirrors)
+                    if data['title']:
+                        print("Success via Piped Protocol.")
+                        return data
+                        
             except Exception as e:
-                print(f"oEmbed Failed: {e}")
+                print(f"Mirror {api_base} failed: {e}")
+                continue
 
-        # --- LAYER 3: Transcript (Hybrid Method) ---
-        try:
-            print(f"Fetching Transcript for {video_id}...")
-            transcript_text = ""
-            
-            # Try Modern Method (Preferred)
+        # 4. FALLBACK: oEmbed (Title Only)
+        # If all Piped mirrors fail, at least get the Title so the Judge isn't totally blind.
+        if not data['title']:
             try:
-                t_list = YouTubeTranscriptApi.list_transcripts(video_id)
-                try: t = t_list.find_transcript(['en', 'en-US'])
-                except: t = t_list.find_generated_transcript(['en', 'en-US'])
-                transcript_text = " ".join([x['text'] for x in t.fetch()])
-            
-            # Fallback for Old Library Version (AttributeError)
-            except AttributeError:
-                print("Method 'list_transcripts' missing. Using legacy 'get_transcript'.")
-                # The old method returns the list of dicts directly
-                t_data = YouTubeTranscriptApi.get_transcript(video_id)
-                transcript_text = " ".join([x['text'] for x in t_data])
-                
-            data['transcript'] = transcript_text[:2500]
-            
-        except Exception as e:
-            print(f"Transcript Error: {e}")
-            
-        return data
+                print("All Piped mirrors failed. Using oEmbed Fallback.")
+                oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+                res = requests.get(oembed_url, timeout=5)
+                if res.status_code == 200:
+                    data['title'] = res.json().get('title', 'Social Media Video')
+            except: pass
 
+        return data
     def _smart_search(self, query):
         print(f"DEBUG: Smart search for '{query}'")
         max_retries = 3
