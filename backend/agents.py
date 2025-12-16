@@ -7,10 +7,13 @@ import re
 import queue
 import threading
 import traceback
+import time
+import random
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.tools import DuckDuckGoSearchResults
 from langchain_core.messages import HumanMessage
+from duckduckgo_search import DDGS
 import yt_dlp
 
 try:
@@ -90,19 +93,45 @@ class ShinSwarm:
             
         return data
 
-    async def run_search_agent(self, query, log_queue):
-        await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": f"Deep Scanning: {query}..."}))
-        try:
-            task1 = asyncio.to_thread(self.search_tool.run, f"{query} fact check hoax")
-            task2 = asyncio.to_thread(self.search_tool.run, f"{query} latest news today")            
-            results = await asyncio.gather(task1, task2)
-            combined_evidence = f"--- SPECIFIC FACT CHECK RESULTS ---\n{results[0]}\n\n--- LATEST NEWS/ACTIVITY RESULTS ---\n{results[1]}"
-            
-            await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": "Cross-referencing complete."}))            
-            return {"data": combined_evidence}
+    def _stealth_search(self, query):
+        print(f"DEBUG: Attempting stealth search for '{query}'")
+        results = []
+        max_retries = 3
         
-        except: return {"data": "Search Failed"}
-    
+        # Spoof a real browser to avoid being blocked as a bot
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Referer": "https://google.com"
+        }
+
+        for attempt in range(max_retries):
+            try:
+                # backend='lite' uses lite.duckduckgo.com (HTML only) which is rarely blocked
+                with DDGS(headers=headers) as ddgs:
+                    # We fetch 5 results. 'lite' backend is key here.
+                    hits = list(ddgs.text(f"{query} latest news", max_results=5, backend='lite'))
+                    if hits:
+                        return json.dumps(hits)
+            except Exception as e:
+                print(f"Search Attempt {attempt+1} failed: {e}")
+                time.sleep(random.uniform(1, 3))
+        
+        return "SEARCH_UNAVAILABLE"
+
+    async def run_search_agent(self, query, log_queue):
+        await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": f"Stealth Search: {query}..."}))
+        try:
+            res = await asyncio.to_thread(self._stealth_search, query)
+            
+            if res == "SEARCH_UNAVAILABLE":
+                 await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": "Search blocked. Using Logic Fallback."}))
+            else:
+                 await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": "Intel Retrieved."}))
+            
+            return {"data": res} 
+        except Exception as e:
+            return {"data": "SEARCH_FAILED"}
+        
     async def run_vision_agent(self, b64, claim, log_queue):
         await log_queue.put(json.dumps({"type": "log", "agent": "VISION", "message": "Analyzing visual data..."}))
         try:

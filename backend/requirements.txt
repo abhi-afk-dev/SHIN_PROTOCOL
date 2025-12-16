@@ -13,4 +13,5 @@ yt-dlp
 youtube-transcript-api
 langchain-google-genai
 langchain-community
+duckduckgo-search
 ddgs
