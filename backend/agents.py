@@ -6,15 +6,12 @@ import json
 import re
 import queue
 import threading
-import traceback
 import time
 import random
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_community.tools import DuckDuckGoSearchResults
-from langchain_core.messages import HumanMessage
 from duckduckgo_search import DDGS
-import yt_dlp
+from langchain_core.messages import HumanMessage
 
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
@@ -25,121 +22,62 @@ load_dotenv()
 
 class ShinSwarm:
     def __init__(self):
-        self.llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=os.getenv("GOOGLE_API_KEY"))
-        self.search_tool = DuckDuckGoSearchResults()
-    
+        self.llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=os.getenv("GOOGLE_API_KEY"))
+
     def clean_json_output(self, text):
         default_verdict = {
             "verdict": "UNVERIFIED", 
             "confidence_score": 0, 
-            "summary": "The system could not generate a conclusive verdict.", 
+            "summary": "Analysis failed.", 
             "sources": []
         }
-
         try:
-            data = None
-            if isinstance(text, dict): 
-                data = text
-            else:
-                text = text.replace("```json", "").replace("```", "")
-                match = re.search(r'\{.*\}', text, re.DOTALL)
-                if match: 
-                    data = json.loads(match.group(0))
-                else:
-                    data = json.loads(text)
+            text = text.replace("```json", "").replace("```", "")
+            match = re.search(r'\{.*\}', text, re.DOTALL)
+            data_str = match.group(0) if match else text
+            data = json.loads(data_str)
             
-            if not data or "verdict" not in data:
-                print("Warning: JSON missing keys, using default.")
-                return default_verdict
-                
+            if "verdict" not in data: data["verdict"] = "UNVERIFIED"
+            if "summary" not in data: data["summary"] = "No summary provided."
+            if "sources" not in data: data["sources"] = []
             return data
-
         except Exception as e:
-            print(f"JSON Clean Error: {e}")
             return default_verdict
-
-    def _clean_vtt(self, vtt_text):
-        # Removes timestamps and duplicates from VTT format
-        lines = vtt_text.split('\n')
-        clean_lines = []
-        seen = set()
-        for line in lines:
-            if "-->" in line or line.strip() == "WEBVTT" or not line.strip(): 
-                continue
-            # simple deduplication
-            if line.strip() not in seen:
-                clean_lines.append(line.strip())
-                seen.add(line.strip())
-        return " ".join(clean_lines)
 
     def _get_video_data(self, url):
         data = {"title": "", "description": "", "transcript": ""}
-        video_id = None
         
-        # 1. Extract Video ID (Same as before)
-        try:
-            if "v=" in url: video_id = url.split("v=")[1].split("&")[0]
-            elif "shorts/" in url: video_id = url.split("shorts/")[1].split("?")[0]
-            elif "youtu.be/" in url: video_id = url.split("youtu.be/")[1].split("?")[0]
-        except: pass
-
-        if not video_id: return data
-
-        # 2. PIPED API MIRRORS (UPDATED LIST)
-        # We use a diverse list of reliable instances to ensure at least one works.
-        piped_instances = [
-            "https://pipedapi.kavin.rocks",       # Official (often busy)
-            "https://api.piped.privacy.com.de",   # High Stability
-            "https://api.piped.projectsegfau.lt", # Reliable Community Instance
-            "https://pipedapi.tokhmi.xyz",        # Backup
-            "https://pipedapi.smnz.de",           # Backup
-            "https://piped-api.lunar.icu"         # Backup
-        ]
-
-        for api_base in piped_instances:
+        if "youtube" in url or "youtu.be" in url:
             try:
-                print(f"Trying Piped Mirror: {api_base} for {video_id}...")
-                # Reduced timeout to 3s to fail fast and find a working one quickly
-                res = requests.get(f"{api_base}/streams/{video_id}", timeout=3)
-                
+                oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
+                res = requests.get(oembed_url, timeout=3)
                 if res.status_code == 200:
                     js = res.json()
                     data['title'] = js.get('title', '')
-                    data['description'] = js.get('description', '')[:1000]
-                    
-                    # 3. FETCH SUBTITLES
-                    subtitles = js.get('subtitles', [])
-                    english_sub = next((s for s in subtitles if 'en' in s.get('code', '')), None)
-                    
-                    if english_sub:
-                        print(f"Found Subtitles: {english_sub['url']}")
-                        sub_res = requests.get(english_sub['url'])
-                        if sub_res.status_code == 200:
-                            data['transcript'] = self._clean_vtt(sub_res.text)[:2500]
-                    
-                    if data['title']:
-                        print(f"Success via {api_base}")
-                        return data
-                        
-            except Exception as e:
-                print(f"Mirror {api_base} failed: {e}")
-                continue
-
-        # 4. FALLBACK (Same as before)
-        if not data['title']:
-            try:
-                print("All Piped mirrors failed. Using oEmbed Fallback.")
-                oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
-                res = requests.get(oembed_url, timeout=5)
-                if res.status_code == 200:
-                    data['title'] = res.json().get('title', 'Social Media Video')
+                    data['description'] = f"Author: {js.get('author_name', 'Unknown')}"
             except: pass
 
+        try:
+            if YouTubeTranscriptApi and data['title']: 
+                video_id = None
+                if "v=" in url: video_id = url.split("v=")[1].split("&")[0]
+                elif "shorts/" in url: video_id = url.split("shorts/")[1].split("?")[0]
+                elif "youtu.be/" in url: video_id = url.split("youtu.be/")[1].split("?")[0]
+                
+                if video_id:
+                    t_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                    try: t = t_list.find_transcript(['en', 'en-US'])
+                    except: t = t_list.find_generated_transcript(['en', 'en-US'])
+                    
+                    data['transcript'] = " ".join([x['text'] for x in t.fetch()])[:2000]
+        except: 
+            pass
+            
         return data
-    
+
     def _smart_search(self, query):
-        print(f"DEBUG: Smart search for '{query}'")
-        max_retries = 3
+        print(f"DEBUG: Search for '{query}'")
+        max_retries = 2
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
@@ -147,53 +85,33 @@ class ShinSwarm:
         for attempt in range(max_retries):
             try:
                 with DDGS(headers=headers) as ddgs:
-                    results = []
-                    
-                    # STRATEGY 1: Try strict "News" search first
-                    # If an event is real, this will have results.
-                    try:
-                        news_hits = list(ddgs.news(f"{query}", max_results=5))
-                        if news_hits:
-                            results.extend(news_hits)
-                    except: pass
-
-                    # STRATEGY 2: If News is empty, use "Text" search (Web)
-                    if not results:
-                        print("DEBUG: No news found, switching to General Web Search...")
-                        web_hits = list(ddgs.text(f"{query} official status", max_results=5, backend='lite'))
-                        results.extend(web_hits)
-
-                    if results:
-                        return json.dumps(results[:5])
-                    
+                    web_hits = list(ddgs.text(f"{query} fact check", max_results=5, backend='lite'))
+                    if web_hits: return json.dumps(web_hits)
             except Exception as e:
-                print(f"Search Attempt {attempt+1} failed: {e}")
-                time.sleep(random.uniform(1, 2))
+                time.sleep(1)
         
         return "SEARCH_UNAVAILABLE"
 
     async def run_search_agent(self, query, log_queue):
-        await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": f"Deep Scanning: {query}..."}))
+        await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": f"Scanning: {query}..."}))
         try:
             res = await asyncio.to_thread(self._smart_search, query)
-            
             if res == "SEARCH_UNAVAILABLE":
-                 await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": "Search blocked. Using Logic Fallback."}))
+                 await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": "Search unavailable."}))
             elif "[]" in res:
-                 await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": "No specific news found (Suggests Fake)."}))
+                 await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": "No direct results found."}))
             else:
                  await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": "Intel Retrieved."}))
-            
             return {"data": res} 
-        except Exception as e:
+        except:
             return {"data": "SEARCH_FAILED"}
-        
+    
     async def run_vision_agent(self, b64, claim, log_queue):
-        await log_queue.put(json.dumps({"type": "log", "agent": "VISION", "message": "Analyzing visual data..."}))
+        await log_queue.put(json.dumps({"type": "log", "agent": "VISION", "message": "Analyzing Visuals..."}))
         try:
             if not b64: return {"data": await self.llm.ainvoke(f"Check logic: {claim}").content}
             msg = HumanMessage(content=[
-                {"type": "text", "text": "Describe for fact-checking:"},
+                {"type": "text", "text": "Describe this image for a fact-checker:"},
                 {"type": "image_url", "image_url": f"data:image/jpeg;base64,{b64}"}
             ])
             res = await self.llm.ainvoke([msg])
@@ -201,48 +119,44 @@ class ShinSwarm:
         except: return {"data": "Vision Analysis Failed"}
 
     async def run_video_agent(self, url, claim, log_queue):
-        await log_queue.put(json.dumps({"type": "log", "agent": "VIDEO_OPS", "message": "Extracting Metadata..."}))
+        await log_queue.put(json.dumps({"type": "log", "agent": "VIDEO_OPS", "message": "Checking Video Metadata..."}))
         data = await asyncio.to_thread(self._get_video_data, url)
         
-        context = f"Title: {data.get('title')}\nDesc: {data.get('description')}\nTranscript: {data.get('transcript')}"
-        prompt = f"Analyze video context for truth: {context}. User Claim: {claim}"
-        
-        try:
-            res = await self.llm.ainvoke(prompt)
-            return {"data": res.content}
-        except: return {"data": "Video Analysis Failed"}
+        return {
+            "data": f"Title: {data.get('title')}\nDesc: {data.get('description')}\nTranscript: {data.get('transcript')}",
+            "raw_metadata": data 
+        }
             
     async def run_judge_agent(self, search, vision, claim, log_queue):
-        await log_queue.put(json.dumps({"type": "log", "agent": "JUDGE", "message": "Finalizing Verdict..."}))
+        await log_queue.put(json.dumps({"type": "log", "agent": "JUDGE", "message": "Final Verdict..."}))
+        
         prompt = f"""
         Act as Veritas Protocol Judge.
         User Claim: "{claim}"
         
-        EVIDENCE PACK (Contains 2 Search Strategies): 
-        {str(search)}
+        SEARCH EVIDENCE: {str(search)}
+        VISUAL/VIDEO EVIDENCE: {str(vision)[:2500]}
         
-        VISUAL ANALYSIS: 
-        {str(vision)[:1500]}
-        
-        CRITICAL INSTRUCTIONS:
-        1. If "Fact Check" results are empty, look at "Latest News". And if the claim is AI-generated content, mark as Fake.
-        2. CONTRADICTION CHECK: If the claim says someone "died today", but "Latest News" shows them attending events or active TODAY/YESTERDAY, the claim is FAKE.
-        3. Ignore irrelevant results (e.g. historical articles from years ago).
+        INSTRUCTIONS:
+        1. If the User Claim is just a URL (http...) and no other evidence exists, mark UNVERIFIED.
+        2. If SEARCH EVIDENCE confirms the claim (or part of the video Title), mark REAL.
+        3. If SEARCH EVIDENCE proves it false, mark FAKE.
+        4. If evidence is missing, check logic: Is the claim plausible?
         
         Return STRICT JSON: 
         {{ 
-            "verdict": "REAL" | "FAKE", 
-            "confidence_score": 0-100, 
-            "summary": "Explain WHY based on the evidence found (e.g. 'Subject is active today according to news reports').", 
-            "sources": [ {{"name": "News Outlet Name", "url": "https://..."}} ] 
+            "verdict": "REAL" | "FAKE" | "UNVERIFIED", 
+            "confidence_score": int, 
+            "summary": "Brief explanation.", 
+            "sources": [ {{"name": "Source Name", "url": "https://..."}} ] 
         }}
         """
         try:
             res = await self.llm.ainvoke(prompt)
             return self.clean_json_output(res.content)
-        except:
+        except Exception as e:
             return self.clean_json_output("{}")
-
+    
     async def _investigate_internal(self, image_input, claim_text, is_file, log_queue):
         final_data = {"type": "result", "final_verdict": {"verdict": "ERROR", "confidence_score": 0, "summary": "System Error.", "sources": []}, "swarm_logs": [], "is_video": False, "auto_claim": claim_text}
         try:
@@ -252,50 +166,32 @@ class ShinSwarm:
             
             final_data['is_video'] = is_video
             
-            # 1. IF VIDEO, EXTRACT DATA FIRST (BEFORE SEARCH)
-            video_data = None
+            video_context = ""
             if is_video:
                 video_result = await self.run_video_agent(image_input, claim_text, log_queue)
-                video_data = video_result['raw_metadata']
-                video_context = video_result['data']
-
-                # 2. AUTO-GENERATE CLAIM IF EMPTY
+                video_data = video_result.get('raw_metadata', {})
+                video_context = video_result.get('data', "")
+                
                 if not claim_text or claim_text.strip() == "":
-                    await log_queue.put(json.dumps({"type": "log", "agent": "SYSTEM", "message": "Auto-Detecting Claim from Video..."}))
+                    if video_data.get('title'):
+                        claim_text = f"Check video claim: {video_data['title']}"
+                        await log_queue.put(json.dumps({"type": "log", "agent": "SYSTEM", "message": f"Claim Found: {video_data['title']}"}))
+                    else:
+                        claim_text = f"Fact check this video: {image_input}"
+                        await log_queue.put(json.dumps({"type": "log", "agent": "SYSTEM", "message": "Using Video URL as Claim"}))
                     
-                    transcript_preview = video_data.get('transcript', '')[:1000]
-                    desc_preview = video_data.get('description', '')[:500]
-                    
-                    # Ask LLM to extract the main claim
-                    claim_prompt = f"""
-                    Based on this video metadata, what is the Main Factual Claim being made?
-                    Title: {video_data.get('title')}
-                    Transcript: {transcript_preview}
-                    Description: {desc_preview}
-                    
-                    Return ONLY the claim as a single sentence.
-                    """
-                    generated_claim = await self.llm.ainvoke(claim_prompt)
-                    claim_text = generated_claim.content.strip()
-                    final_data['auto_claim'] = claim_text # Send back to frontend
-                    await log_queue.put(json.dumps({"type": "log", "agent": "SYSTEM", "message": f"Claim Detected: {claim_text}"}))
-            
+                    final_data['auto_claim'] = claim_text
+
             else:
-                # Image Logic
-                video_context = ""
                 if not is_file:
                     try: 
                         b64 = base64.b64encode(requests.get(image_input).content).decode('utf-8')
                         video_context = await self.run_vision_agent(b64, claim_text, log_queue)
                     except: pass
 
-            # 3. NOW RUN SEARCH WITH THE (POSSIBLY AUTO-GENERATED) CLAIM
             search_task = self.run_search_agent(claim_text, log_queue)
-            
-            # Wait for search
             search_result = await search_task
             
-            # 4. JUDGE
             verdict = await self.run_judge_agent(search_result, video_context, claim_text, log_queue)
             
             final_data['final_verdict'] = verdict
@@ -306,13 +202,12 @@ class ShinSwarm:
         finally:
             await log_queue.put(json.dumps(final_data))
             await log_queue.put(None)
-                  
+
     def investigate_stream_sync(self, image_input, claim_text, is_file=False):
         sync_q = queue.Queue()
         def start_loop():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
             async def wrapper():
                 q = asyncio.Queue()
                 asyncio.create_task(self._investigate_internal(image_input, claim_text, is_file, q))
@@ -322,11 +217,13 @@ class ShinSwarm:
                     if item is None: break
             loop.run_until_complete(wrapper())
             loop.close()
-            
-
         t = threading.Thread(target=start_loop)
         t.start()
+        
         while True:
-            item = sync_q.get()
-            if item is None: break
-            yield item + "\n"
+            try:
+                item = sync_q.get(timeout=2.0)
+                if item is None: break
+                yield item + "\n"
+            except queue.Empty:
+                yield json.dumps({"type": "ping"}) + "\n"
