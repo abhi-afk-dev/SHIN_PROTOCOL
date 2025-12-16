@@ -93,38 +93,50 @@ class ShinSwarm:
             
         return data
 
-    def _stealth_search(self, query):
-        print(f"DEBUG: Attempting stealth search for '{query}'")
-        results = []
+    def _smart_search(self, query):
+        print(f"DEBUG: Smart search for '{query}'")
         max_retries = 3
-        
-        # Spoof a real browser to avoid being blocked as a bot
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Referer": "https://google.com"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
 
         for attempt in range(max_retries):
             try:
-                # backend='lite' uses lite.duckduckgo.com (HTML only) which is rarely blocked
                 with DDGS(headers=headers) as ddgs:
-                    # We fetch 5 results. 'lite' backend is key here.
-                    hits = list(ddgs.text(f"{query} latest news", max_results=5, backend='lite'))
-                    if hits:
-                        return json.dumps(hits)
+                    results = []
+                    
+                    # STRATEGY 1: Try strict "News" search first
+                    # If an event is real, this will have results.
+                    try:
+                        news_hits = list(ddgs.news(f"{query}", max_results=5))
+                        if news_hits:
+                            results.extend(news_hits)
+                    except: pass
+
+                    # STRATEGY 2: If News is empty, use "Text" search (Web)
+                    if not results:
+                        print("DEBUG: No news found, switching to General Web Search...")
+                        web_hits = list(ddgs.text(f"{query} official status", max_results=5, backend='lite'))
+                        results.extend(web_hits)
+
+                    if results:
+                        return json.dumps(results[:5])
+                    
             except Exception as e:
                 print(f"Search Attempt {attempt+1} failed: {e}")
-                time.sleep(random.uniform(1, 3))
+                time.sleep(random.uniform(1, 2))
         
         return "SEARCH_UNAVAILABLE"
 
     async def run_search_agent(self, query, log_queue):
-        await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": f"Stealth Search: {query}..."}))
+        await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": f"Deep Scanning: {query}..."}))
         try:
-            res = await asyncio.to_thread(self._stealth_search, query)
+            res = await asyncio.to_thread(self._smart_search, query)
             
             if res == "SEARCH_UNAVAILABLE":
                  await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": "Search blocked. Using Logic Fallback."}))
+            elif "[]" in res:
+                 await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": "No specific news found (Suggests Fake)."}))
             else:
                  await log_queue.put(json.dumps({"type": "log", "agent": "SEARCH", "message": "Intel Retrieved."}))
             
