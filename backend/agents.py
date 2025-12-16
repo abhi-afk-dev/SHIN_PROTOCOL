@@ -200,19 +200,7 @@ class ShinSwarm:
             return self.clean_json_output("{}")
 
     async def _investigate_internal(self, image_input, claim_text, is_file, log_queue):
-        final_data = {
-            "type": "result",
-            "final_verdict": {
-                "verdict": "ERROR", 
-                "confidence_score": 0, 
-                "summary": "System Error occurred.", 
-                "sources": []
-            },
-            "swarm_logs": [],
-            "is_video": False,
-            "auto_claim": claim_text
-        }
-        
+        final_data = {"type": "result", "final_verdict": {"verdict": "ERROR", "confidence_score": 0, "summary": "System Error.", "sources": []}, "swarm_logs": [], "is_video": False, "auto_claim": claim_text}
         try:
             is_video = False
             if image_input and not is_file and any(x in image_input.lower() for x in ['youtube', 'youtu.be', 'instagram', 'tiktok']):
@@ -220,35 +208,61 @@ class ShinSwarm:
             
             final_data['is_video'] = is_video
             
-            search_task = self.run_search_agent(claim_text, log_queue)
-            if is_video: analysis_task = self.run_video_agent(image_input, claim_text, log_queue)
-            else: 
-                b64 = image_input
-                if not is_file: 
-                    try: b64 = base64.b64encode(requests.get(image_input).content).decode('utf-8')
+            # 1. IF VIDEO, EXTRACT DATA FIRST (BEFORE SEARCH)
+            video_data = None
+            if is_video:
+                video_result = await self.run_video_agent(image_input, claim_text, log_queue)
+                video_data = video_result['raw_metadata']
+                video_context = video_result['data']
+
+                # 2. AUTO-GENERATE CLAIM IF EMPTY
+                if not claim_text or claim_text.strip() == "":
+                    await log_queue.put(json.dumps({"type": "log", "agent": "SYSTEM", "message": "Auto-Detecting Claim from Video..."}))
+                    
+                    transcript_preview = video_data.get('transcript', '')[:1000]
+                    desc_preview = video_data.get('description', '')[:500]
+                    
+                    # Ask LLM to extract the main claim
+                    claim_prompt = f"""
+                    Based on this video metadata, what is the Main Factual Claim being made?
+                    Title: {video_data.get('title')}
+                    Transcript: {transcript_preview}
+                    Description: {desc_preview}
+                    
+                    Return ONLY the claim as a single sentence.
+                    """
+                    generated_claim = await self.llm.ainvoke(claim_prompt)
+                    claim_text = generated_claim.content.strip()
+                    final_data['auto_claim'] = claim_text # Send back to frontend
+                    await log_queue.put(json.dumps({"type": "log", "agent": "SYSTEM", "message": f"Claim Detected: {claim_text}"}))
+            
+            else:
+                # Image Logic
+                video_context = ""
+                if not is_file:
+                    try: 
+                        b64 = base64.b64encode(requests.get(image_input).content).decode('utf-8')
+                        video_context = await self.run_vision_agent(b64, claim_text, log_queue)
                     except: pass
-                analysis_task = self.run_vision_agent(b64, claim_text, log_queue)
+
+            # 3. NOW RUN SEARCH WITH THE (POSSIBLY AUTO-GENERATED) CLAIM
+            search_task = self.run_search_agent(claim_text, log_queue)
             
-            results = await asyncio.gather(search_task, analysis_task)
+            # Wait for search
+            search_result = await search_task
             
-            # The Critical Step: Get Verdict
-            verdict = await self.run_judge_agent(results[0], results[1], claim_text, log_queue)
+            # 4. JUDGE
+            verdict = await self.run_judge_agent(search_result, video_context, claim_text, log_queue)
             
-            # Update the result data
             final_data['final_verdict'] = verdict
-            final_data['swarm_logs'] = [results[0], results[1]]
+            final_data['swarm_logs'] = [search_result, {"data": "Visuals Processed"}]
             
         except Exception as e:
-            err_msg = f"CRITICAL ERROR: {str(e)}"
-            print(traceback.format_exc()) 
-            await log_queue.put(json.dumps({"type": "log", "agent": "SYSTEM", "message": err_msg}))
-            final_data['final_verdict']['summary'] = f"Analysis interrupted: {str(e)}"
-            
+            await log_queue.put(json.dumps({"type": "log", "agent": "SYSTEM", "message": f"Error: {str(e)}"}))
         finally:
-            # Send the result to frontend
             await log_queue.put(json.dumps(final_data))
             await log_queue.put(None)
-            
+                  
     def investigate_stream_sync(self, image_input, claim_text, is_file=False):
         sync_q = queue.Queue()
         def start_loop():
